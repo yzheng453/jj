@@ -23,6 +23,7 @@ use std::iter;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use bstr::BString;
 use futures::StreamExt as _;
@@ -45,6 +46,7 @@ use crate::commit::Commit;
 use crate::conflict_labels::ConflictLabels;
 use crate::conflicts::MaterializedTreeValue;
 use crate::conflicts::materialize_tree_value;
+use crate::default_index::bit_set::AncestorsBitSet;
 use crate::diff::ContentDiff;
 use crate::diff::DiffHunkKind;
 use crate::files;
@@ -53,7 +55,9 @@ use crate::matchers::FilesMatcher;
 use crate::matchers::Matcher;
 use crate::matchers::Visit;
 use crate::merge::Merge;
+use crate::object_id::HexPrefix;
 use crate::object_id::ObjectId as _;
+use crate::object_id::PrefixResolution;
 use crate::repo_path::RepoPath;
 use crate::revset::GENERATION_RANGE_FULL;
 use crate::revset::ResolvedExpression;
@@ -1074,6 +1078,36 @@ impl EvaluationContext<'_> {
                 let set1 = self.evaluate_predicate(expression1)?;
                 let set2 = self.evaluate_predicate(expression2)?;
                 Ok(Box::new(IntersectionRevset { set1, set2 }))
+            }
+            ResolvedPredicateExpression::Divergent { visible_heads } => {
+                let composite = self.index.as_composite().commits();
+                let mut reachable_set = AncestorsBitSet::with_capacity(composite.num_commits());
+                for id in visible_heads {
+                    reachable_set.add_head(composite.commit_id_to_pos(id).unwrap());
+                }
+                let reachable_set = Arc::new(Mutex::new(reachable_set));
+                Ok(box_pure_predicate_fn(
+                    move |index: &CompositeIndex, pos: GlobalCommitPosition| {
+                        let commits = index.commits();
+                        let entry = commits.entry_by_pos(pos);
+                        let change_id = &entry.change_id();
+                        let target_resolution = commits.resolve_change_id_prefix_with_ancestors(
+                            &reachable_set,
+                            &HexPrefix::from_id(change_id),
+                        );
+                        match target_resolution {
+                            PrefixResolution::SingleMatch(resolved_change_targets) => {
+                                Ok(resolved_change_targets.is_divergent())
+                            }
+                            PrefixResolution::AmbiguousMatch => {
+                                panic!("complete change_id should be unambiguous")
+                            }
+                            PrefixResolution::NoMatch => {
+                                panic!("the commit itself should be reachable")
+                            }
+                        }
+                    },
+                ))
             }
         }
     }
