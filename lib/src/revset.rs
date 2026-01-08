@@ -311,6 +311,7 @@ pub enum RevsetExpression<St: ExpressionState> {
     Filter(RevsetFilterPredicate),
     /// Marker for subtree that should be intersected as filter.
     AsFilter(Arc<Self>),
+    Divergent,
     /// Resolves symbols and visibility at the specified operation.
     AtOperation {
         operation: St::Operation,
@@ -684,6 +685,9 @@ impl ResolvedRevsetExpression {
 pub enum ResolvedPredicateExpression {
     /// Pure filter predicate.
     Filter(RevsetFilterPredicate),
+    Divergent {
+        visible_heads: Vec<CommitId>,
+    },
     /// Set expression to be evaluated as filter. This is typically a subtree
     /// node of `Union` with a pure filter predicate.
     Set(Box<ResolvedExpression>),
@@ -1101,6 +1105,10 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
     map.insert("conflicts", |_diagnostics, function, _context| {
         function.expect_no_arguments()?;
         Ok(RevsetExpression::filter(RevsetFilterPredicate::HasConflict))
+    });
+    map.insert("divergent", |_diagnostics, function, _context| {
+        function.expect_no_arguments()?;
+        Ok(Arc::new(RevsetExpression::Divergent))
     });
     map.insert("present", |diagnostics, function, context| {
         let [arg] = function.expect_exact_arguments()?;
@@ -1646,6 +1654,7 @@ fn try_transform_expression<St: ExpressionState, E>(
                     },
                 )
             }
+            RevsetExpression::Divergent => None,
         }
         .map(Arc::new))
     }
@@ -1894,6 +1903,7 @@ where
             let expression2 = folder.fold_expression(expression2)?;
             RevsetExpression::Difference(expression1, expression2).into()
         }
+        RevsetExpression::Divergent => RevsetExpression::Divergent.into(),
     };
     Ok(expression)
 }
@@ -2129,6 +2139,7 @@ fn internalize_filter<St: ExpressionState>(
                 _ => None,
             },
         },
+        RevsetExpression::Divergent => Some(mark_filter(expression.clone())),
         // Difference(e1, e2) should have been unfolded to Intersection(e1, NotIn(e2)).
         _ => None,
     })
@@ -3244,6 +3255,12 @@ impl VisibilityResolutionContext<'_> {
                     self.resolve(expression2).into(),
                 )
             }
+            RevsetExpression::Divergent => ResolvedExpression::FilterWithin {
+                candidates: self.resolve_all().into(),
+                predicate: ResolvedPredicateExpression::Divergent {
+                    visible_heads: self.visible_heads.to_owned(),
+                },
+            },
         }
     }
 
@@ -3338,6 +3355,9 @@ impl VisibilityResolutionContext<'_> {
                 let predicate2 = ResolvedPredicateExpression::NotIn(predicate2.into());
                 ResolvedPredicateExpression::Intersection(predicate1.into(), predicate2.into())
             }
+            RevsetExpression::Divergent => ResolvedPredicateExpression::Divergent {
+                visible_heads: self.visible_heads.to_owned(),
+            },
         }
     }
 }
@@ -5290,6 +5310,12 @@ mod tests {
                 Filter(AuthorName(Pattern(Exact("foo")))),
                 Filter(CommitterName(Pattern(Exact("bar")))),
             ),
+        )
+        "#);
+        insta::assert_debug_snapshot!(optimize(parse("divergent() & foo").unwrap()), @r#"
+        Intersection(
+            CommitRef(Symbol("foo")),
+            AsFilter(Divergent),
         )
         "#);
 
