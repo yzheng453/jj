@@ -51,6 +51,7 @@ use crate::diff::ContentDiff;
 use crate::diff::DiffHunkKind;
 use crate::files;
 use crate::graph::GraphNode;
+use crate::index::ResolvedChangeState;
 use crate::matchers::FilesMatcher;
 use crate::matchers::Matcher;
 use crate::matchers::Visit;
@@ -1064,6 +1065,35 @@ impl EvaluationContext<'_> {
             ResolvedPredicateExpression::Filter(predicate) => {
                 Ok(build_predicate_fn(self.store.clone(), predicate))
             }
+            ResolvedPredicateExpression::Divergent { visible_heads } => {
+                let composite = self.index.as_composite().commits();
+                let mut reachable_set = AncestorsBitSet::with_capacity(composite.num_commits());
+                for id in visible_heads {
+                    reachable_set.add_head(composite.commit_id_to_pos(id).unwrap());
+                }
+                let reachable_set = Arc::new(Mutex::new(reachable_set));
+                Ok(box_pure_predicate_fn(
+                    move |index: &CompositeIndex, pos: GlobalCommitPosition| {
+                        let commits = index.commits();
+                        let entry = commits.entry_by_pos(pos);
+                        let change_id = &entry.change_id();
+
+                        match commits.resolve_change_id_prefix(&HexPrefix::from_id(change_id)) {
+                            PrefixResolution::NoMatch => panic!("the commit itself should be reachable"),
+                            PrefixResolution::SingleMatch((_change_id, positions)) => {
+                                let mut reachable_set = reachable_set.lock().unwrap();
+                                let targets = commits.resolve_change_state_for_positions(positions, &mut reachable_set);
+                                Ok(targets.iter()
+                                    .filter(|(_, state)| *state == ResolvedChangeState::Visible)
+                                    .take(2)
+                                    .count() > 1
+                                )
+                            },
+                            PrefixResolution::AmbiguousMatch => panic!("complete change_id should be unambiguous"),
+                        }
+                    },
+                ))
+            }
             ResolvedPredicateExpression::Set(expression) => Ok(self.evaluate(expression)?),
             ResolvedPredicateExpression::NotIn(complement) => {
                 let set = self.evaluate_predicate(complement)?;
@@ -1078,36 +1108,6 @@ impl EvaluationContext<'_> {
                 let set1 = self.evaluate_predicate(expression1)?;
                 let set2 = self.evaluate_predicate(expression2)?;
                 Ok(Box::new(IntersectionRevset { set1, set2 }))
-            }
-            ResolvedPredicateExpression::Divergent { visible_heads } => {
-                let composite = self.index.as_composite().commits();
-                let mut reachable_set = AncestorsBitSet::with_capacity(composite.num_commits());
-                for id in visible_heads {
-                    reachable_set.add_head(composite.commit_id_to_pos(id).unwrap());
-                }
-                let reachable_set = Arc::new(Mutex::new(reachable_set));
-                Ok(box_pure_predicate_fn(
-                    move |index: &CompositeIndex, pos: GlobalCommitPosition| {
-                        let commits = index.commits();
-                        let entry = commits.entry_by_pos(pos);
-                        let change_id = &entry.change_id();
-                        let target_resolution = commits.resolve_change_id_prefix_with_ancestors(
-                            &reachable_set,
-                            &HexPrefix::from_id(change_id),
-                        );
-                        match target_resolution {
-                            PrefixResolution::SingleMatch(resolved_change_targets) => {
-                                Ok(resolved_change_targets.is_divergent())
-                            }
-                            PrefixResolution::AmbiguousMatch => {
-                                panic!("complete change_id should be unambiguous")
-                            }
-                            PrefixResolution::NoMatch => {
-                                panic!("the commit itself should be reachable")
-                            }
-                        }
-                    },
-                ))
             }
         }
     }

@@ -4804,6 +4804,11 @@ fn test_evaluate_expression_divergent() {
     assert_eq!(resolve_commit_ids(repo.as_ref(), "divergent()"), vec![]);
 
     assert_eq!(
+        resolve_commit_ids(repo.as_ref(), &format!("{} & divergent()", commit1.id())),
+        vec![]
+    );
+
+    assert_eq!(
         resolve_commit_ids(repo.as_ref(), "at_operation(@-, divergent())"),
         vec![commit2.id().clone(), commit1.id().clone()]
     );

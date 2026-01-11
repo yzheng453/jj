@@ -288,42 +288,29 @@ impl CompositeCommitIndex {
                 }
             })
     }
-
-    /// Resolves the given change id `prefix` to the associated entries that are
-    /// descendants of the given ancestors.
-    ///
-    /// The returned index positions are sorted in descending order.
-    pub(super) fn resolve_change_id_prefix_with_ancestors(
+    
+    /// Helper function to evaluate the visibility for a SmallGlobalCommitPositionsVec
+    /// according to the reahchable_set provided.
+    /// Requires positions to be in descending order.
+    pub(super) fn resolve_change_state_for_positions(
         &self,
-        ancestors: &Mutex<AncestorsBitSet>,
-        prefix: &HexPrefix,
-    ) -> PrefixResolution<ResolvedChangeTargets> {
-        match self.resolve_change_id_prefix(prefix) {
-            PrefixResolution::NoMatch => PrefixResolution::NoMatch,
-            PrefixResolution::SingleMatch((_change_id, positions)) => {
-                debug_assert!(positions.is_sorted_by(|a, b| a > b));
-                let mut reachable_set = ancestors.lock().unwrap();
-                reachable_set.visit_until(self, *positions.last().unwrap());
-                let targets = positions
-                    .iter()
-                    .map(|&pos| {
-                        let commit_id = self.entry_by_pos(pos).commit_id();
-                        let state = if reachable_set.contains(pos) {
-                            ResolvedChangeState::Visible
-                        } else {
-                            ResolvedChangeState::Hidden
-                        };
-                        (commit_id, state)
-                    })
-                    .collect_vec();
-                if targets.is_empty() {
-                    PrefixResolution::NoMatch
+        positions: SmallGlobalCommitPositionsVec,
+        reachable_set: &mut AncestorsBitSet
+    ) -> Vec<(CommitId, ResolvedChangeState)> {
+        debug_assert!(positions.is_sorted_by(|a, b| a > b));
+        reachable_set.visit_until(self, *positions.last().unwrap());
+        positions
+            .iter()
+            .map(|&pos| {
+                let commit_id = self.entry_by_pos(pos).commit_id();
+                let state = if reachable_set.contains(pos) {
+                    ResolvedChangeState::Visible
                 } else {
-                    PrefixResolution::SingleMatch(ResolvedChangeTargets { targets })
-                }
-            }
-            PrefixResolution::AmbiguousMatch => PrefixResolution::AmbiguousMatch,
-        }
+                    ResolvedChangeState::Hidden
+                };
+                (commit_id, state)
+            })
+            .collect_vec()
     }
 
     pub fn is_ancestor(&self, ancestor_id: &CommitId, descendant_id: &CommitId) -> bool {
@@ -697,7 +684,19 @@ impl<I: AsCompositeIndex + Send + Sync> ChangeIdIndex for ChangeIdIndexImpl<I> {
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<ResolvedChangeTargets>> {
         let index = self.index.as_composite().commits();
-        let prefix = index.resolve_change_id_prefix_with_ancestors(&self.reachable_set, prefix);
+        let prefix = match index.resolve_change_id_prefix(prefix) {
+            PrefixResolution::NoMatch => PrefixResolution::NoMatch,
+            PrefixResolution::SingleMatch((_change_id, positions)) => {
+                let mut reachable_set = self.reachable_set.lock().unwrap();
+                let targets = index.resolve_change_state_for_positions(positions, &mut reachable_set);
+                if targets.is_empty() {
+                    PrefixResolution::NoMatch
+                } else {
+                    PrefixResolution::SingleMatch(ResolvedChangeTargets { targets })
+                }
+            }
+            PrefixResolution::AmbiguousMatch => PrefixResolution::AmbiguousMatch,
+        };
         Ok(prefix)
     }
 
