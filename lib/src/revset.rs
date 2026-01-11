@@ -1108,7 +1108,9 @@ static BUILTIN_FUNCTION_MAP: LazyLock<HashMap<&str, RevsetFunction>> = LazyLock:
     });
     map.insert("divergent", |_diagnostics, function, _context| {
         function.expect_no_arguments()?;
-        Ok(Arc::new(RevsetExpression::Divergent))
+        Ok(Arc::new(RevsetExpression::AsFilter(Arc::new(
+            RevsetExpression::Divergent,
+        ))))
     });
     map.insert("present", |diagnostics, function, context| {
         let [arg] = function.expect_exact_arguments()?;
@@ -2139,7 +2141,6 @@ fn internalize_filter<St: ExpressionState>(
                 _ => None,
             },
         },
-        RevsetExpression::Divergent => Some(mark_filter(expression.clone())),
         // Difference(e1, e2) should have been unfolded to Intersection(e1, NotIn(e2)).
         _ => None,
     })

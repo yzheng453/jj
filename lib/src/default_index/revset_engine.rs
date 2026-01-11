@@ -1079,17 +1079,25 @@ impl EvaluationContext<'_> {
                         let change_id = &entry.change_id();
 
                         match commits.resolve_change_id_prefix(&HexPrefix::from_id(change_id)) {
-                            PrefixResolution::NoMatch => panic!("the commit itself should be reachable"),
+                            PrefixResolution::NoMatch => {
+                                panic!("the commit itself should be reachable")
+                            }
                             PrefixResolution::SingleMatch((_change_id, positions)) => {
                                 let mut reachable_set = reachable_set.lock().unwrap();
-                                let targets = commits.resolve_change_state_for_positions(positions, &mut reachable_set);
-                                Ok(targets.iter()
+                                let targets = commits.resolve_change_state_for_positions(
+                                    positions,
+                                    &mut reachable_set,
+                                );
+                                Ok(targets
+                                    .iter()
                                     .filter(|(_, state)| *state == ResolvedChangeState::Visible)
                                     .take(2)
-                                    .count() > 1
-                                )
-                            },
-                            PrefixResolution::AmbiguousMatch => panic!("complete change_id should be unambiguous"),
+                                    .count()
+                                    > 1)
+                            }
+                            PrefixResolution::AmbiguousMatch => {
+                                panic!("complete change_id should be unambiguous")
+                            }
                         }
                     },
                 ))

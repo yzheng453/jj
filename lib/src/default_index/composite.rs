@@ -288,14 +288,14 @@ impl CompositeCommitIndex {
                 }
             })
     }
-    
-    /// Helper function to evaluate the visibility for a SmallGlobalCommitPositionsVec
-    /// according to the reahchable_set provided.
-    /// Requires positions to be in descending order.
+
+    /// Helper function to evaluate the visibility for a
+    /// SmallGlobalCommitPositionsVec according to the reahchable_set
+    /// provided. Requires positions to be in descending order.
     pub(super) fn resolve_change_state_for_positions(
         &self,
         positions: SmallGlobalCommitPositionsVec,
-        reachable_set: &mut AncestorsBitSet
+        reachable_set: &mut AncestorsBitSet,
     ) -> Vec<(CommitId, ResolvedChangeState)> {
         debug_assert!(positions.is_sorted_by(|a, b| a > b));
         reachable_set.visit_until(self, *positions.last().unwrap());
@@ -688,7 +688,8 @@ impl<I: AsCompositeIndex + Send + Sync> ChangeIdIndex for ChangeIdIndexImpl<I> {
             PrefixResolution::NoMatch => PrefixResolution::NoMatch,
             PrefixResolution::SingleMatch((_change_id, positions)) => {
                 let mut reachable_set = self.reachable_set.lock().unwrap();
-                let targets = index.resolve_change_state_for_positions(positions, &mut reachable_set);
+                let targets =
+                    index.resolve_change_state_for_positions(positions, &mut reachable_set);
                 if targets.is_empty() {
                     PrefixResolution::NoMatch
                 } else {
