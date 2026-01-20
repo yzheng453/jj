@@ -24,6 +24,7 @@ pub mod complete;
 pub mod config;
 pub mod description_util;
 pub mod diff_util;
+pub mod eval;
 pub mod formatter;
 pub mod generic_templater;
 #[cfg(feature = "git")]
