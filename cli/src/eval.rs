@@ -601,9 +601,43 @@ fn parse_expression_node(pair: Pair<Rule>) -> EvalParseResult<ExpressionNode> {
         .parse(pair.into_inner())
 }
 
+fn parse_variable_binding(pair: Pair<Rule>) -> EvalParseResult<VariableBinding> {
+    assert_eq!(pair.as_rule(), Rule::binding);
+    let mut inner = pair.into_inner();
+    let name_pair = inner.next().unwrap();
+    let name_span = name_pair.as_span();
+    let value_pair = inner.next().unwrap();
+    let name = parse_identifier_name(name_pair)?;
+    let value = parse_expression_node(value_pair)?;
+    Ok(VariableBinding {
+        name,
+        name_span,
+        value,
+    })
+}
+
 fn parse_expressions_node(pair: Pair<Rule>) -> EvalParseResult<ExpressionNode> {
     assert_eq!(pair.as_rule(), Rule::expressions);
-    todo!()
+    let span = pair.as_span();
+    let inner = pair.into_inner();
+    let mut pairs: Vec<_> = inner.collect();
+    if pairs.is_empty() {
+        return Err(EvalParseError::expression(
+            "Expected at least one expression",
+            span,
+        ));
+    } else {
+        let body = parse_expression_node(pairs.pop().unwrap())?;
+        let bindings: Vec<_> = pairs.into_iter().map(parse_variable_binding).try_collect()?;
+        Ok(if bindings.is_empty() {
+            body
+        } else {
+            ExpressionNode::new(
+                ExpressionKind::Bindings(Box::new(bindings), Box::new(body)),
+                span,
+            )
+        })
+    }
 }
 
 /// Parses text into AST nodes. No type/name checking is made at this stage.
@@ -611,8 +645,7 @@ pub fn parse_eval_expressions(expressions_text: &str) -> EvalParseResult<Express
     let mut pairs: Pairs<Rule> = EvalParser::parse(Rule::program, expressions_text)?;
     let first_pair = pairs.next().unwrap();
     if first_pair.as_rule() == Rule::EOI {
-        let span = first_pair.as_span();
-        Ok(ExpressionNode::new(ExpressionKind::Concat(vec![]), span))
+        todo!("What should we do with an empty expression?")
     } else {
         parse_expressions_node(first_pair)
     }
