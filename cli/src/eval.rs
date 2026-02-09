@@ -34,7 +34,6 @@ use jj_lib::dsl_util::FunctionCallParser;
 use jj_lib::dsl_util::InvalidArguments;
 use jj_lib::dsl_util::KeywordArgument;
 use jj_lib::dsl_util::StringLiteralParser;
-use jj_lib::dsl_util::VariableBinding;
 use jj_lib::dsl_util::collect_similar;
 use jj_lib::str_util::StringPattern;
 use pest::Parser as _;
@@ -73,7 +72,6 @@ impl Rule {
             Self::string_literal => None,
             Self::integer_literal => None,
             Self::identifier => None,
-            Self::concat_op => Some("++"),
             Self::logical_or_op => Some("||"),
             Self::logical_and_op => Some("&&"),
             Self::eq_op => Some("=="),
@@ -89,7 +87,6 @@ impl Rule {
             Self::rem_op => Some("%"),
             Self::logical_not_op => Some("!"),
             Self::negate_op => Some("-"),
-            Self::pattern_kind_op => Some(":"),
             Self::prefix_ops => None,
             Self::infix_ops => None,
             Self::function => None,
@@ -516,7 +513,7 @@ fn parse_term_node(pair: Pair<Rule>) -> EvalParseResult<ExpressionNode> {
             let function = Box::new(FUNCTION_CALL_PARSER.parse(
                 expr,
                 parse_identifier_name,
-                parse_expressions_node,
+                parse_expression_node,
             )?);
             ExpressionKind::FunctionCall(function)
         }
@@ -524,6 +521,7 @@ fn parse_term_node(pair: Pair<Rule>) -> EvalParseResult<ExpressionNode> {
             let lambda = Box::new(parse_lambda_node(expr)?);
             ExpressionKind::Lambda(lambda)
         }
+        Rule::expression => parse_expression_node(expr)?.kind,
         other => panic!("unexpected term: {other:?}"),
     };
     let primary_node = ExpressionNode::new(primary_kind, primary_span);
@@ -535,7 +533,7 @@ fn parse_term_node(pair: Pair<Rule>) -> EvalParseResult<ExpressionNode> {
             function: FUNCTION_CALL_PARSER.parse(
                 chain,
                 parse_identifier_name,
-                parse_expressions_node,
+                parse_expression_node,
             )?,
         });
         Ok(ExpressionNode::new(
@@ -622,10 +620,10 @@ fn parse_expressions_node(pair: Pair<Rule>) -> EvalParseResult<ExpressionNode> {
     let inner = pair.into_inner();
     let mut pairs: Vec<_> = inner.collect();
     if pairs.is_empty() {
-        return Err(EvalParseError::expression(
+        Err(EvalParseError::expression(
             "Expected at least one expression",
             span,
-        ));
+        ))
     } else {
         let body = parse_expression_node(pairs.pop().unwrap())?;
         let bindings: Vec<_> = pairs.into_iter().map(parse_variable_binding).try_collect()?;
@@ -861,13 +859,13 @@ mod tests {
     }
 
     fn parse_into_kind(template_text: &str) -> Result<ExpressionKind<'_>, EvalParseErrorKind> {
-        parse_template(template_text)
+        parse_eval_expressions(template_text)
             .map(|node| node.kind)
             .map_err(|err| err.kind)
     }
 
     fn parse_normalized(template_text: &str) -> ExpressionNode<'_> {
-        normalize_tree(parse_template(template_text).unwrap())
+        normalize_tree(parse_eval_expressions(template_text).unwrap())
     }
 
     /// Drops auxiliary data of AST so it can be compared with other node.
@@ -913,7 +911,6 @@ mod tests {
                 let rhs = Box::new(normalize_tree(*rhs));
                 ExpressionKind::Binary(op, lhs, rhs)
             }
-            ExpressionKind::Concat(nodes) => ExpressionKind::Concat(normalize_list(nodes)),
             ExpressionKind::FunctionCall(function) => {
                 let function = Box::new(normalize_function_call(*function));
                 ExpressionKind::FunctionCall(function)
@@ -934,6 +931,17 @@ mod tests {
                 ExpressionKind::Lambda(lambda)
             }
             ExpressionKind::AliasExpanded(_, subst) => normalize_tree(*subst).kind,
+            ExpressionKind::Bindings(variable_bindings, expression_node) => {
+                let variable_bindings = Box::new(variable_bindings.into_iter().map(|binding| {
+                    VariableBinding {
+                        name: binding.name,
+                        name_span: empty_span(),
+                        value: normalize_tree(binding.value),
+                    }
+                }).collect());
+                let expression_node = Box::new(normalize_tree(*expression_node));
+                ExpressionKind::Bindings(variable_bindings, expression_node)
+            }
         };
         ExpressionNode {
             kind: normalized_kind,
@@ -944,16 +952,16 @@ mod tests {
     #[test]
     fn test_parse_tree_eq() {
         assert_eq!(
-            normalize_tree(parse_template(r#" commit_id.short(1 )  ++ description"#).unwrap()),
-            normalize_tree(parse_template(r#"commit_id.short( 1 )++(description)"#).unwrap()),
+            normalize_tree(parse_eval_expressions(r#" a  + b"#).unwrap()),
+            normalize_tree(parse_eval_expressions(r#"a+b"#).unwrap()),
         );
         assert_ne!(
-            normalize_tree(parse_template(r#" "ab" "#).unwrap()),
-            normalize_tree(parse_template(r#" "a" ++ "b" "#).unwrap()),
+            normalize_tree(parse_eval_expressions(r#" "ab" "#).unwrap()),
+            normalize_tree(parse_eval_expressions(r#" "a" + "b" "#).unwrap()),
         );
         assert_ne!(
-            normalize_tree(parse_template(r#" "foo" ++ "0" "#).unwrap()),
-            normalize_tree(parse_template(r#" "foo" ++ 0 "#).unwrap()),
+            normalize_tree(parse_eval_expressions(r#" "foo" + "0" "#).unwrap()),
+            normalize_tree(parse_eval_expressions(r#" "foo" + 0 "#).unwrap()),
         );
     }
 
@@ -1003,36 +1011,13 @@ mod tests {
             parse_normalized("((a + (((b * c) / d) % e)) - (-f)) == g"),
         );
 
-        // Logical operator bounds more tightly than concatenation. This might
-        // not be so intuitive, but should be harmless.
-        assert_eq!(
-            parse_normalized(r"x && y ++ z"),
-            parse_normalized(r"(x && y) ++ z"),
-        );
-        assert_eq!(
-            parse_normalized(r"x ++ y || z"),
-            parse_normalized(r"x ++ (y || z)"),
-        );
-        assert_eq!(
-            parse_normalized(r"x == y ++ z"),
-            parse_normalized(r"(x == y) ++ z"),
-        );
-        assert_eq!(
-            parse_normalized(r"x != y ++ z"),
-            parse_normalized(r"(x != y) ++ z"),
-        );
-
         // Expression span
-        assert_eq!(parse_template(" ! x ").unwrap().span.as_str(), "! x");
-        assert_eq!(parse_template(" x ||y ").unwrap().span.as_str(), "x ||y");
-        assert_eq!(parse_template(" (x) ").unwrap().span.as_str(), "(x)");
+        assert_eq!(parse_eval_expressions(" ! x ").unwrap().span.as_str(), "! x");
+        assert_eq!(parse_eval_expressions(" x ||y ").unwrap().span.as_str(), "x ||y");
+        assert_eq!(parse_eval_expressions(" (x) ").unwrap().span.as_str(), "(x)");
         assert_eq!(
-            parse_template(" ! (x ||y) ").unwrap().span.as_str(),
+            parse_eval_expressions(" ! (x ||y) ").unwrap().span.as_str(),
             "! (x ||y)"
-        );
-        assert_eq!(
-            parse_template("(x ++ y ) ").unwrap().span.as_str(),
-            "(x ++ y )"
         );
     }
 
@@ -1046,35 +1031,35 @@ mod tests {
         }
 
         // Trailing comma isn't allowed for empty argument
-        assert!(parse_template(r#" "".first_line() "#).is_ok());
-        assert!(parse_template(r#" "".first_line(,) "#).is_err());
+        assert!(parse_eval_expressions(r#" "".first_line() "#).is_ok());
+        assert!(parse_eval_expressions(r#" "".first_line(,) "#).is_err());
 
         // Trailing comma is allowed for the last argument
-        assert!(parse_template(r#" "".contains("") "#).is_ok());
-        assert!(parse_template(r#" "".contains("",) "#).is_ok());
-        assert!(parse_template(r#" "".contains("" ,  ) "#).is_ok());
-        assert!(parse_template(r#" "".contains(,"") "#).is_err());
-        assert!(parse_template(r#" "".contains("",,) "#).is_err());
-        assert!(parse_template(r#" "".contains("" , , ) "#).is_err());
-        assert!(parse_template(r#" label("","") "#).is_ok());
-        assert!(parse_template(r#" label("","",) "#).is_ok());
-        assert!(parse_template(r#" label("",,"") "#).is_err());
+        assert!(parse_eval_expressions(r#" "".contains("") "#).is_ok());
+        assert!(parse_eval_expressions(r#" "".contains("",) "#).is_ok());
+        assert!(parse_eval_expressions(r#" "".contains("" ,  ) "#).is_ok());
+        assert!(parse_eval_expressions(r#" "".contains(,"") "#).is_err());
+        assert!(parse_eval_expressions(r#" "".contains("",,) "#).is_err());
+        assert!(parse_eval_expressions(r#" "".contains("" , , ) "#).is_err());
+        assert!(parse_eval_expressions(r#" label("","") "#).is_ok());
+        assert!(parse_eval_expressions(r#" label("","",) "#).is_ok());
+        assert!(parse_eval_expressions(r#" label("",,"") "#).is_err());
 
         // Keyword arguments
-        assert!(parse_template("f(foo = bar)").is_ok());
-        assert!(parse_template("f( foo=bar )").is_ok());
-        assert!(parse_template("x.f(foo, bar=0, baz=1)").is_ok());
+        assert!(parse_eval_expressions("f(foo = bar)").is_ok());
+        assert!(parse_eval_expressions("f( foo=bar )").is_ok());
+        assert!(parse_eval_expressions("x.f(foo, bar=0, baz=1)").is_ok());
 
         // Boolean literal cannot be used as a function name
-        assert!(parse_template("false()").is_err());
+        assert!(parse_eval_expressions("false()").is_err());
         // Boolean literal cannot be used as a parameter name
-        assert!(parse_template("f(false=0)").is_err());
+        assert!(parse_eval_expressions("f(false=0)").is_err());
         // Function arguments can be any expression
-        assert!(parse_template("f(false)").is_ok());
+        assert!(parse_eval_expressions("f(false)").is_ok());
 
         // Expression span
         let function =
-            unwrap_function_call(parse_template("foo( a, (b) , -(c), d = (e) )").unwrap());
+            unwrap_function_call(parse_eval_expressions("foo( a, (b) , -(c), d = (e) )").unwrap());
         assert_eq!(function.name_span.as_str(), "foo");
         // Because we use the implicit WHITESPACE rule, we have little control
         // over leading/trailing whitespaces.
@@ -1094,9 +1079,9 @@ mod tests {
         );
 
         // Expression span
-        assert_eq!(parse_template(" x.f() ").unwrap().span.as_str(), "x.f()");
+        assert_eq!(parse_eval_expressions(" x.f() ").unwrap().span.as_str(), "x.f()");
         assert_eq!(
-            parse_template(" x.f().g() ").unwrap().span.as_str(),
+            parse_eval_expressions(" x.f().g() ").unwrap().span.as_str(),
             "x.f().g()",
         );
     }
@@ -1110,29 +1095,29 @@ mod tests {
             }
         }
 
-        let lambda = unwrap_lambda(parse_template("|| a").unwrap());
+        let lambda = unwrap_lambda(parse_eval_expressions("|| a").unwrap());
         assert_eq!(lambda.params.len(), 0);
         assert_eq!(lambda.body.kind, ExpressionKind::Identifier("a"));
-        let lambda = unwrap_lambda(parse_template("|foo| a").unwrap());
+        let lambda = unwrap_lambda(parse_eval_expressions("|foo| a").unwrap());
         assert_eq!(lambda.params.len(), 1);
-        let lambda = unwrap_lambda(parse_template("|foo, b| a").unwrap());
+        let lambda = unwrap_lambda(parse_eval_expressions("|foo, b| a").unwrap());
         assert_eq!(lambda.params.len(), 2);
 
         // No body
-        assert!(parse_template("||").is_err());
+        assert!(parse_eval_expressions("||").is_err());
 
         // Binding
         assert_eq!(
-            parse_normalized("||  x ++ y"),
-            parse_normalized("|| (x ++ y)"),
+            parse_normalized("||  x + y"),
+            parse_normalized("|| (x + y)"),
         );
         assert_eq!(
             parse_normalized("f( || x,   || y)"),
             parse_normalized("f((|| x), (|| y))"),
         );
         assert_eq!(
-            parse_normalized("||  x ++  || y"),
-            parse_normalized("|| (x ++ (|| y))"),
+            parse_normalized("||  x +  || y"),
+            parse_normalized("|| (x + (|| y))"),
         );
 
         // Lambda vs logical operator: weird, but this is type error anyway
@@ -1140,21 +1125,21 @@ mod tests {
         assert_eq!(parse_normalized("||||x"), parse_normalized("|| (|| x)"));
 
         // Trailing comma
-        assert!(parse_template("|,| a").is_err());
-        assert!(parse_template("|x,| a").is_ok());
-        assert!(parse_template("|x , | a").is_ok());
-        assert!(parse_template("|,x| a").is_err());
-        assert!(parse_template("| x,y,| a").is_ok());
-        assert!(parse_template("|x,,y| a").is_err());
+        assert!(parse_eval_expressions("|,| a").is_err());
+        assert!(parse_eval_expressions("|x,| a").is_ok());
+        assert!(parse_eval_expressions("|x , | a").is_ok());
+        assert!(parse_eval_expressions("|,x| a").is_err());
+        assert!(parse_eval_expressions("| x,y,| a").is_ok());
+        assert!(parse_eval_expressions("|x,,y| a").is_err());
 
         // Formal parameter can't be redefined
         assert_eq!(
-            parse_template("|x, x| a").unwrap_err().kind,
+            parse_eval_expressions("|x, x| a").unwrap_err().kind,
             EvalParseErrorKind::RedefinedFunctionParameter
         );
 
         // Boolean literal cannot be used as a parameter name
-        assert!(parse_template("|false| a").is_err());
+        assert!(parse_eval_expressions("|false| a").is_err());
     }
 
     #[test]
@@ -1179,10 +1164,6 @@ mod tests {
             parse_into_kind(r#" " " "#),
             Ok(ExpressionKind::String(" ".to_owned())),
         );
-        assert_eq!(
-            parse_into_kind(r#" ' ' "#),
-            Ok(ExpressionKind::String(" ".to_owned())),
-        );
 
         // "\<char>" escapes
         assert_eq!(
@@ -1194,24 +1175,6 @@ mod tests {
         assert_eq!(
             parse_into_kind(r#" "\y" "#),
             Err(EvalParseErrorKind::SyntaxError),
-        );
-
-        // Single-quoted raw string
-        assert_eq!(
-            parse_into_kind(r#" '' "#),
-            Ok(ExpressionKind::String("".to_owned())),
-        );
-        assert_eq!(
-            parse_into_kind(r#" 'a\n' "#),
-            Ok(ExpressionKind::String(r"a\n".to_owned())),
-        );
-        assert_eq!(
-            parse_into_kind(r#" '\' "#),
-            Ok(ExpressionKind::String(r"\".to_owned())),
-        );
-        assert_eq!(
-            parse_into_kind(r#" '"' "#),
-            Ok(ExpressionKind::String(r#"""#.to_owned())),
         );
 
         // Hex bytes
@@ -1234,51 +1197,6 @@ mod tests {
         assert_eq!(
             parse_into_kind(r#""\xgg""#),
             Err(EvalParseErrorKind::SyntaxError),
-        );
-    }
-
-    #[test]
-    fn test_string_pattern() {
-        assert_eq!(
-            parse_into_kind(r#"regex:"meow""#),
-            Ok(ExpressionKind::StringPattern {
-                kind: "regex",
-                value: "meow".to_owned()
-            }),
-        );
-        assert_eq!(
-            parse_into_kind(r#"regex:'\r\n'"#),
-            Ok(ExpressionKind::StringPattern {
-                kind: "regex",
-                value: r#"\r\n"#.to_owned()
-            })
-        );
-        assert_eq!(
-            parse_into_kind(r#"regex-i:'\r\n'"#),
-            Ok(ExpressionKind::StringPattern {
-                kind: "regex-i",
-                value: r#"\r\n"#.to_owned()
-            })
-        );
-        assert_eq!(
-            parse_into_kind("regex:meow"),
-            Err(EvalParseErrorKind::SyntaxError),
-            "no bare words in string patterns in templates"
-        );
-        assert_eq!(
-            parse_into_kind("regex: 'with spaces'"),
-            Err(EvalParseErrorKind::SyntaxError),
-            "no spaces after"
-        );
-        assert_eq!(
-            parse_into_kind("regex :'with spaces'"),
-            Err(EvalParseErrorKind::SyntaxError),
-            "no spaces before either"
-        );
-        assert_eq!(
-            parse_into_kind("regex : 'with spaces'"),
-            Err(EvalParseErrorKind::SyntaxError),
-            "certainly not both"
         );
     }
 
@@ -1362,24 +1280,24 @@ mod tests {
     #[test]
     fn test_expand_symbol_alias() {
         assert_eq!(
-            with_aliases([("AB", "a ++ b")]).parse_normalized("AB ++ c"),
-            parse_normalized("(a ++ b) ++ c"),
+            with_aliases([("AB", "a + b")]).parse_normalized("AB + c"),
+            parse_normalized("(a + b) + c"),
         );
         assert_eq!(
-            with_aliases([("AB", "a ++ b")]).parse_normalized("if(AB, label(c, AB))"),
-            parse_normalized("if((a ++ b), label(c, (a ++ b)))"),
+            with_aliases([("AB", "a + b")]).parse_normalized("if(AB, label(c, AB))"),
+            parse_normalized("if((a + b), label(c, (a + b)))"),
         );
 
         // Multi-level substitution.
         assert_eq!(
-            with_aliases([("A", "BC"), ("BC", "b ++ C"), ("C", "c")]).parse_normalized("A"),
-            parse_normalized("b ++ c"),
+            with_aliases([("A", "BC"), ("BC", "b + C"), ("C", "c")]).parse_normalized("A"),
+            parse_normalized("b + c"),
         );
 
         // Operator expression can be expanded in concatenation.
         assert_eq!(
-            with_aliases([("AB", "a || b")]).parse_normalized("AB ++ c"),
-            parse_normalized("(a || b) ++ c"),
+            with_aliases([("AB", "a || b")]).parse_normalized("AB + c"),
+            parse_normalized("(a || b) + c"),
         );
 
         // Operands should be expanded.
@@ -1407,8 +1325,8 @@ mod tests {
         // If we don't like this behavior, maybe we can turn off alias substitution
         // for lambda parameters.
         assert_eq!(
-            with_aliases([("A", "a ++ b")]).parse_normalized("|A| A"),
-            parse_normalized("|A| (a ++ b)"),
+            with_aliases([("A", "a + b")]).parse_normalized("|A| A"),
+            parse_normalized("|A| (a + b)"),
         );
 
         // Infinite recursion, where the top-level error isn't of RecursiveAlias kind.
@@ -1417,7 +1335,7 @@ mod tests {
             EvalParseErrorKind::InAliasExpansion("A".to_owned()),
         );
         assert_eq!(
-            with_aliases([("A", "B"), ("B", "b ++ C"), ("C", "c ++ B")])
+            with_aliases([("A", "B"), ("B", "b + C"), ("C", "c + B")])
                 .parse("A")
                 .unwrap_err()
                 .kind,
@@ -1442,42 +1360,42 @@ mod tests {
             parse_normalized("a"),
         );
         assert_eq!(
-            with_aliases([("F( x, y )", "x ++ y")]).parse_normalized("F(a, b)"),
-            parse_normalized("a ++ b"),
+            with_aliases([("F( x, y )", "x + y")]).parse_normalized("F(a, b)"),
+            parse_normalized("a + b"),
         );
 
         // Not recursion because functions are overloaded by arity.
         assert_eq!(
-            with_aliases([("F(x)", "F(x,b)"), ("F(x,y)", "x ++ y")]).parse_normalized("F(a)"),
-            parse_normalized("a ++ b")
+            with_aliases([("F(x)", "F(x,b)"), ("F(x,y)", "x + y")]).parse_normalized("F(a)"),
+            parse_normalized("a + b")
         );
 
         // Arguments should be resolved in the current scope.
         assert_eq!(
-            with_aliases([("F(x,y)", "if(x, y)")]).parse_normalized("F(a ++ y, b ++ x)"),
-            parse_normalized("if((a ++ y), (b ++ x))"),
+            with_aliases([("F(x,y)", "if(x, y)")]).parse_normalized("F(a + y, b + x)"),
+            parse_normalized("if((a + y), (b + x))"),
         );
-        // F(a) -> if(G(a), y) -> if((x ++ a), y)
+        // F(a) -> if(G(a), y) -> if((x + a), y)
         assert_eq!(
-            with_aliases([("F(x)", "if(G(x), y)"), ("G(y)", "x ++ y")]).parse_normalized("F(a)"),
-            parse_normalized("if((x ++ a), y)"),
+            with_aliases([("F(x)", "if(G(x), y)"), ("G(y)", "x + y")]).parse_normalized("F(a)"),
+            parse_normalized("if((x + a), y)"),
         );
-        // F(G(a)) -> F(x ++ a) -> if(G(x ++ a), y) -> if((x ++ (x ++ a)), y)
+        // F(G(a)) -> F(x + a) -> if(G(x + a), y) -> if((x + (x + a)), y)
         assert_eq!(
-            with_aliases([("F(x)", "if(G(x), y)"), ("G(y)", "x ++ y")]).parse_normalized("F(G(a))"),
-            parse_normalized("if((x ++ (x ++ a)), y)"),
+            with_aliases([("F(x)", "if(G(x), y)"), ("G(y)", "x + y")]).parse_normalized("F(G(a))"),
+            parse_normalized("if((x + (x + a)), y)"),
         );
 
         // Function parameter should precede the symbol alias.
         assert_eq!(
-            with_aliases([("F(X)", "X"), ("X", "x")]).parse_normalized("F(a) ++ X"),
-            parse_normalized("a ++ x"),
+            with_aliases([("F(X)", "X"), ("X", "x")]).parse_normalized("F(a) + X"),
+            parse_normalized("a + x"),
         );
 
         // Function parameter shouldn't be expanded in symbol alias.
         assert_eq!(
-            with_aliases([("F(x)", "x ++ A"), ("A", "x")]).parse_normalized("F(a)"),
-            parse_normalized("a ++ x"),
+            with_aliases([("F(x)", "x + A"), ("A", "x")]).parse_normalized("F(a)"),
+            parse_normalized("a + x"),
         );
 
         // Function and symbol aliases reside in separate namespaces.
@@ -1495,8 +1413,8 @@ mod tests {
         // Formal parameter shouldn't be substituted by alias parameter, but
         // the expression should be substituted.
         assert_eq!(
-            with_aliases([("F(x)", "|x| x")]).parse_normalized("F(a ++ b)"),
-            parse_normalized("|x| (a ++ b)"),
+            with_aliases([("F(x)", "|x| x")]).parse_normalized("F(a + b)"),
+            parse_normalized("|x| (a + b)"),
         );
 
         // Invalid number of arguments.
@@ -1509,7 +1427,7 @@ mod tests {
             EvalParseErrorKind::InvalidArguments { .. }
         );
         assert_matches!(
-            with_aliases([("F(x,y)", "x ++ y")])
+            with_aliases([("F(x,y)", "x + y")])
                 .parse("F(a,b,c)")
                 .unwrap_err()
                 .kind,
