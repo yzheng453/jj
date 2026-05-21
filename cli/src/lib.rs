@@ -25,6 +25,9 @@ pub mod config;
 pub mod description_util;
 pub mod diff_util;
 pub mod eval;
+pub mod eval_interpreter;
+pub mod eval_typechecker;
+pub mod eval_types;
 pub mod formatter;
 pub mod generic_templater;
 #[cfg(feature = "git")]

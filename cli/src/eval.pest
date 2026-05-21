@@ -79,8 +79,11 @@ function_arguments = {
 lambda = {
   "|" ~ formal_parameters ~ "|" ~ expressions
 }
+formal_parameter = {
+  identifier ~ (":" ~ identifier)?
+}
 formal_parameters = {
-  identifier ~ ("," ~ identifier)* ~ ","?
+  formal_parameter ~ ("," ~ formal_parameter)* ~ ","?
   | ""
 }
 
@@ -102,11 +105,15 @@ expression = {
 }
 
 binding = {
-  identifier ~ "=" ~ expression ~ ";"
+  "let" ~ identifier ~ "=" ~ expression
+}
+
+statement = {
+  binding | expression
 }
 
 expressions = {
-  binding* ~ expression
+  statement ~ (";" ~ statement)* ~ ";"?
 }
 
 program = _{ SOI ~ expressions? ~ EOI }

@@ -17,7 +17,6 @@ use std::error;
 use std::mem;
 use std::sync::LazyLock;
 
-use gix::config::tree::checkout::validate;
 use itertools::Itertools as _;
 use jj_lib::dsl_util;
 use jj_lib::dsl_util::AliasDeclaration;
@@ -32,7 +31,6 @@ use jj_lib::dsl_util::ExpressionFolder;
 use jj_lib::dsl_util::FoldableExpression;
 use jj_lib::dsl_util::FunctionCallParser;
 use jj_lib::dsl_util::InvalidArguments;
-use jj_lib::dsl_util::KeywordArgument;
 use jj_lib::dsl_util::StringLiteralParser;
 use jj_lib::dsl_util::collect_similar;
 use jj_lib::str_util::StringPattern;
@@ -103,6 +101,8 @@ impl Rule {
             Self::program => None,
             Self::function_alias_declaration => None,
             Self::alias_declaration => None,
+            Self::formal_parameter => None,
+            Self::statement => None,
         }
     }
 }
@@ -243,7 +243,7 @@ impl AliasExpandError for EvalParseError {
 
     fn within_alias_expansion(self, id: AliasId<'_>, span: pest::Span<'_>) -> Self {
         let kind = match id {
-            AliasId::Symbol(_) | AliasId::Function(..) => {
+            AliasId::Symbol(_) | AliasId::Function(..) | AliasId::Pattern(..) => {
                 EvalParseErrorKind::InAliasExpansion(id.to_string())
             }
             AliasId::Parameter(_) => EvalParseErrorKind::InParameterExpansion(id.to_string()),
@@ -296,7 +296,8 @@ pub enum ExpressionKind<'i> {
     FunctionCall(Box<FunctionCallNode<'i>>),
     MethodCall(Box<MethodCallNode<'i>>),
     Lambda(Box<LambdaNode<'i>>),
-    Bindings(Box<Vec<VariableBinding<'i>>>, Box<ExpressionNode<'i>>),
+    Binding(Box<VariableBinding<'i>>),
+    Sequence(Vec<ExpressionNode<'i>>),
     /// Identity node to preserve the span in the source template text.
     AliasExpanded(AliasId<'i>, Box<ExpressionNode<'i>>),
 }
@@ -338,19 +339,22 @@ impl<'i> FoldableExpression<'i> for ExpressionKind<'i> {
                 });
                 Ok(Self::Lambda(lambda))
             }
-            Self::Bindings(bindings, body) => {
-                let bindings: Box<Vec<VariableBinding<'_>>> = Box::new(bindings
-                    .into_iter()
-                    .map(|binding| 
-                        Ok(VariableBinding {
-                            name: binding.name,
-                            name_span: binding.name_span,
-                            value: folder.fold_expression(binding.value)?,
-                        })
-                    )
-                    .try_collect()?);
-                let body = Box::new(folder.fold_expression(*body)?);
-                Ok(Self::Bindings(bindings, body))
+            Self::Binding(binding) => {
+                let folded_val = folder.fold_expression(binding.value)?;
+                let new_binding = VariableBinding {
+                    name: binding.name,
+                    name_span: binding.name_span,
+                    value: folded_val,
+                };
+                Ok(Self::Binding(Box::new(new_binding)))
+            }
+            Self::Sequence(nodes) => {
+                let mut folded_nodes = Vec::with_capacity(nodes.len());
+                for node in nodes {
+                    let folded = folder.fold_expression(node)?;
+                    folded_nodes.push(folded);
+                }
+                Ok(Self::Sequence(folded_nodes))
             }
             Self::AliasExpanded(id, subst) => {
                 let subst = Box::new(folder.fold_expression(*subst)?);
@@ -371,6 +375,10 @@ impl<'i> AliasExpandableExpression<'i> for ExpressionKind<'i> {
 
     fn alias_expanded(id: AliasId<'i>, subst: Box<ExpressionNode<'i>>) -> Self {
         ExpressionKind::AliasExpanded(id, subst)
+    }
+
+    fn pattern(_: Box<jj_lib::dsl_util::PatternNode<'i, Self>>) -> Self {
+        todo!()
     }
 }
 
@@ -423,7 +431,7 @@ pub struct MethodCallNode<'i> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LambdaNode<'i> {
-    pub params: Vec<&'i str>,
+    pub params: Vec<(&'i str, Option<&'i str>)>,
     pub params_span: pest::Span<'i>,
     pub body: ExpressionNode<'i>,
 }
@@ -457,14 +465,20 @@ fn parse_identifier_name(pair: Pair<'_, Rule>) -> EvalParseResult<&str> {
     }
 }
 
-fn parse_formal_parameters(params_pair: Pair<'_, Rule>) -> EvalParseResult<Vec<&str>> {
+fn parse_formal_parameters(params_pair: Pair<'_, Rule>) -> EvalParseResult<Vec<(&str, Option<&str>)>> {
     assert_eq!(params_pair.as_rule(), Rule::formal_parameters);
     let params_span = params_pair.as_span();
     let params: Vec<_> = params_pair
         .into_inner()
-        .map(parse_identifier_name)
+        .map(|formal_param_pair| {
+            assert_eq!(formal_param_pair.as_rule(), Rule::formal_parameter);
+            let mut inner = formal_param_pair.into_inner();
+            let name = parse_identifier_name(inner.next().unwrap())?;
+            let ty = inner.next().map(|ty_pair| parse_identifier_name(ty_pair)).transpose()?;
+            Ok::<(&str, Option<&str>), EvalParseError>((name, ty))
+        })
         .try_collect()?;
-    if params.iter().all_unique() {
+    if params.iter().map(|(name, _)| name).all_unique() {
         Ok(params)
     } else {
         Err(EvalParseError::with_span(
@@ -618,23 +632,34 @@ fn parse_expressions_node(pair: Pair<Rule>) -> EvalParseResult<ExpressionNode> {
     assert_eq!(pair.as_rule(), Rule::expressions);
     let span = pair.as_span();
     let inner = pair.into_inner();
-    let mut pairs: Vec<_> = inner.collect();
+    let pairs: Vec<_> = inner.collect();
     if pairs.is_empty() {
         Err(EvalParseError::expression(
             "Expected at least one expression",
             span,
         ))
     } else {
-        let body = parse_expression_node(pairs.pop().unwrap())?;
-        let bindings: Vec<_> = pairs.into_iter().map(parse_variable_binding).try_collect()?;
-        Ok(if bindings.is_empty() {
-            body
+        let mut nodes = Vec::new();
+        for statement_pair in pairs {
+            assert_eq!(statement_pair.as_rule(), Rule::statement);
+            let inner_pair = statement_pair.into_inner().next().unwrap();
+            let node = match inner_pair.as_rule() {
+                Rule::binding => {
+                    let binding_span = inner_pair.as_span();
+                    let binding = parse_variable_binding(inner_pair)?;
+                    ExpressionNode::new(ExpressionKind::Binding(Box::new(binding)), binding_span)
+                }
+                Rule::expression => parse_expression_node(inner_pair)?,
+                _ => unreachable!(),
+            };
+            nodes.push(node);
+        }
+        
+        if nodes.len() == 1 {
+            Ok(nodes.pop().unwrap())
         } else {
-            ExpressionNode::new(
-                ExpressionKind::Bindings(Box::new(bindings), Box::new(body)),
-                span,
-            )
-        })
+            Ok(ExpressionNode::new(ExpressionKind::Sequence(nodes), span))
+        }
     }
 }
 
@@ -672,7 +697,7 @@ impl AliasDeclarationParser for EvalAliasParser {
                 let name = parse_identifier_name(name_pair)?.to_owned();
                 let params = parse_formal_parameters(params_pair)?
                     .into_iter()
-                    .map(|s| s.to_owned())
+                    .map(|(s, _)| s.to_owned())
                     .collect();
                 Ok(AliasDeclaration::Function(name, params))
             }
@@ -730,9 +755,7 @@ pub fn expect_string_pattern(node: &ExpressionNode<'_>) -> EvalParseResult<Strin
 }
 
 /// Unwraps inner node if the given `node` is a lambda.
-pub fn expect_lambda<'a, 'i>(
-    node: &'a ExpressionNode<'i>,
-) -> EvalParseResult<&'a LambdaNode<'i>> {
+pub fn expect_lambda<'a, 'i>(node: &'a ExpressionNode<'i>) -> EvalParseResult<&'a LambdaNode<'i>> {
     catch_aliases_no_diagnostics(node, |node| match &node.kind {
         ExpressionKind::Lambda(lambda) => Ok(lambda.as_ref()),
         _ => Err(EvalParseError::expression(
@@ -828,6 +851,40 @@ pub fn lookup_method<'a, V>(
     }
 }
 
+use crate::eval_interpreter::{evaluate, EvalContext, RepoContext};
+use crate::eval_typechecker::{type_check, TypeContext};
+use crate::eval_types::Value;
+use jj_lib::repo::{MutableRepo, ReadonlyRepo};
+
+pub struct ScriptOptions {
+    pub allow_mutations: bool,
+}
+
+pub fn run_script<'a, 'i>(
+    script: &'i str,
+    repo: &'a ReadonlyRepo,
+    mut_repo_opt: Option<&'a mut MutableRepo>,
+) -> Result<Value<'i>, Box<dyn std::error::Error>> {
+    let raw_ast = parse_eval_expressions(script)?;
+
+    let mut type_ctx = TypeContext::default_builtins();
+    let typed_ast = type_check(&raw_ast, &mut type_ctx)?;
+
+    let repo_ctx = if let Some(mut_repo) = mut_repo_opt {
+        RepoContext::Mutable(mut_repo)
+    } else {
+        RepoContext::ReadOnly(repo)
+    };
+
+    let mut eval_ctx = EvalContext {
+        repo: repo_ctx,
+        stack: Vec::new(),
+        fp: 0,
+    };
+
+    Ok(evaluate(&typed_ast, &mut eval_ctx)?)
+}
+
 #[cfg(test)]
 mod tests {
     use assert_matches::assert_matches;
@@ -853,7 +910,7 @@ mod tests {
     ) -> WithEvalAliasesMap {
         let mut aliases_map = EvalAliasesMap::new();
         for (decl, defn) in aliases {
-            aliases_map.insert(decl, defn).unwrap();
+            aliases_map.insert(decl, defn, None).unwrap();
         }
         WithEvalAliasesMap(aliases_map)
     }
@@ -931,16 +988,16 @@ mod tests {
                 ExpressionKind::Lambda(lambda)
             }
             ExpressionKind::AliasExpanded(_, subst) => normalize_tree(*subst).kind,
-            ExpressionKind::Bindings(variable_bindings, expression_node) => {
-                let variable_bindings = Box::new(variable_bindings.into_iter().map(|binding| {
-                    VariableBinding {
-                        name: binding.name,
-                        name_span: empty_span(),
-                        value: normalize_tree(binding.value),
-                    }
-                }).collect());
-                let expression_node = Box::new(normalize_tree(*expression_node));
-                ExpressionKind::Bindings(variable_bindings, expression_node)
+            ExpressionKind::Binding(binding) => {
+                let binding = Box::new(VariableBinding {
+                    name: binding.name,
+                    name_span: empty_span(),
+                    value: normalize_tree(binding.value),
+                });
+                ExpressionKind::Binding(binding)
+            }
+            ExpressionKind::Sequence(nodes) => {
+                ExpressionKind::Sequence(nodes.into_iter().map(normalize_tree).collect())
             }
         };
         ExpressionNode {
@@ -1012,9 +1069,18 @@ mod tests {
         );
 
         // Expression span
-        assert_eq!(parse_eval_expressions(" ! x ").unwrap().span.as_str(), "! x");
-        assert_eq!(parse_eval_expressions(" x ||y ").unwrap().span.as_str(), "x ||y");
-        assert_eq!(parse_eval_expressions(" (x) ").unwrap().span.as_str(), "(x)");
+        assert_eq!(
+            parse_eval_expressions(" ! x ").unwrap().span.as_str(),
+            "! x"
+        );
+        assert_eq!(
+            parse_eval_expressions(" x ||y ").unwrap().span.as_str(),
+            "x ||y"
+        );
+        assert_eq!(
+            parse_eval_expressions(" (x) ").unwrap().span.as_str(),
+            "(x)"
+        );
         assert_eq!(
             parse_eval_expressions(" ! (x ||y) ").unwrap().span.as_str(),
             "! (x ||y)"
@@ -1079,7 +1145,10 @@ mod tests {
         );
 
         // Expression span
-        assert_eq!(parse_eval_expressions(" x.f() ").unwrap().span.as_str(), "x.f()");
+        assert_eq!(
+            parse_eval_expressions(" x.f() ").unwrap().span.as_str(),
+            "x.f()"
+        );
         assert_eq!(
             parse_eval_expressions(" x.f().g() ").unwrap().span.as_str(),
             "x.f().g()",
@@ -1204,10 +1273,7 @@ mod tests {
     fn test_integer_literal() {
         assert_eq!(parse_into_kind("0"), Ok(ExpressionKind::Integer(0)));
         assert_eq!(parse_into_kind("(42)"), Ok(ExpressionKind::Integer(42)));
-        assert_eq!(
-            parse_into_kind("00"),
-            Err(EvalParseErrorKind::SyntaxError),
-        );
+        assert_eq!(parse_into_kind("00"), Err(EvalParseErrorKind::SyntaxError),);
 
         assert_eq!(
             parse_into_kind(&format!("{}", i64::MAX)),
@@ -1222,29 +1288,29 @@ mod tests {
     #[test]
     fn test_parse_alias_decl() {
         let mut aliases_map = EvalAliasesMap::new();
-        aliases_map.insert("sym", r#""is symbol""#).unwrap();
-        aliases_map.insert("func()", r#""is function 0""#).unwrap();
+        aliases_map.insert("sym", r#""is symbol""#, None).unwrap();
+        aliases_map.insert("func()", r#""is function 0""#, None).unwrap();
         aliases_map
-            .insert("func(a, b)", r#""is function 2""#)
+            .insert("func(a, b)", r#""is function 2""#, None)
             .unwrap();
-        aliases_map.insert("func(a)", r#""is function a""#).unwrap();
-        aliases_map.insert("func(b)", r#""is function b""#).unwrap();
+        aliases_map.insert("func(a)", r#""is function a""#, None).unwrap();
+        aliases_map.insert("func(b)", r#""is function b""#, None).unwrap();
 
-        let (id, defn) = aliases_map.get_symbol("sym").unwrap();
+        let (id, defn, _) = aliases_map.get_symbol("sym").unwrap();
         assert_eq!(id, AliasId::Symbol("sym"));
         assert_eq!(defn, r#""is symbol""#);
 
-        let (id, params, defn) = aliases_map.get_function("func", 0).unwrap();
+        let (id, params, defn, _) = aliases_map.get_function("func", 0).unwrap();
         assert_eq!(id, AliasId::Function("func", &[]));
         assert!(params.is_empty());
         assert_eq!(defn, r#""is function 0""#);
 
-        let (id, params, defn) = aliases_map.get_function("func", 1).unwrap();
+        let (id, params, defn, _) = aliases_map.get_function("func", 1).unwrap();
         assert_eq!(id, AliasId::Function("func", &["b".to_owned()]));
         assert_eq!(params, ["b"]);
         assert_eq!(defn, r#""is function b""#);
 
-        let (id, params, defn) = aliases_map.get_function("func", 2).unwrap();
+        let (id, params, defn, _) = aliases_map.get_function("func", 2).unwrap();
         assert_eq!(
             id,
             AliasId::Function("func", &["a".to_owned(), "b".to_owned()])
@@ -1256,25 +1322,25 @@ mod tests {
 
         // Formal parameter 'a' can't be redefined
         assert_eq!(
-            aliases_map.insert("f(a, a)", r#""""#).unwrap_err().kind,
+            aliases_map.insert("f(a, a)", r#""""#, None).unwrap_err().kind,
             EvalParseErrorKind::RedefinedFunctionParameter
         );
 
         // Boolean literal cannot be used as a symbol, function, or parameter name
-        assert!(aliases_map.insert("false", r#"""#).is_err());
-        assert!(aliases_map.insert("true()", r#"""#).is_err());
-        assert!(aliases_map.insert("f(false)", r#"""#).is_err());
+        assert!(aliases_map.insert("false", r#"""#, None).is_err());
+        assert!(aliases_map.insert("true()", r#"""#, None).is_err());
+        assert!(aliases_map.insert("f(false)", r#"""#, None).is_err());
 
         // Trailing comma isn't allowed for empty parameter
-        assert!(aliases_map.insert("f(,)", r#"""#).is_err());
+        assert!(aliases_map.insert("f(,)", r#"""#, None).is_err());
         // Trailing comma is allowed for the last parameter
-        assert!(aliases_map.insert("g(a,)", r#"""#).is_ok());
-        assert!(aliases_map.insert("h(a ,  )", r#"""#).is_ok());
-        assert!(aliases_map.insert("i(,a)", r#"""#).is_err());
-        assert!(aliases_map.insert("j(a,,)", r#"""#).is_err());
-        assert!(aliases_map.insert("k(a  , , )", r#"""#).is_err());
-        assert!(aliases_map.insert("l(a,b,)", r#"""#).is_ok());
-        assert!(aliases_map.insert("m(a,,b)", r#"""#).is_err());
+        assert!(aliases_map.insert("g(a,)", r#"""#, None).is_ok());
+        assert!(aliases_map.insert("h(a ,  )", r#"""#, None).is_ok());
+        assert!(aliases_map.insert("i(,a)", r#"""#, None).is_err());
+        assert!(aliases_map.insert("j(a,,)", r#"""#, None).is_err());
+        assert!(aliases_map.insert("k(a  , , )", r#"""#, None).is_err());
+        assert!(aliases_map.insert("l(a,b,)", r#"""#, None).is_ok());
+        assert!(aliases_map.insert("m(a,,b)", r#"""#, None).is_err());
     }
 
     #[test]
