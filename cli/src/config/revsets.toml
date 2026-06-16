@@ -16,6 +16,7 @@ op-diff-changes-in = "mutable() | immutable_heads()"
 sign = "reachable(@, mutable())"
 bookmark-advance-to = "@"
 bookmark-advance-from = "heads(::to & bookmarks())"
+squash-into = "heads(source)-"
 
 [revset-aliases]
 # trunk() can be overridden as '<bookmark>@<remote>'.

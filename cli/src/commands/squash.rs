@@ -191,24 +191,22 @@ pub(crate) async fn cmd_squash(
 
     let mut workspace_command = command.workspace_helper(ui).await?;
 
-    let mut sources: Vec<Commit>;
-    let sources_str: String;
+    let mut sources: Vec<Commit> = if args.from.is_empty() {
+            workspace_command.parse_revset(ui, &RevisionArg::AT)?
+        } else {
+            workspace_command.parse_union_revsets(ui, &args.from)?
+        }
+        .evaluate_to_commits()?
+        .try_collect()
+        .await?;
+    let sources_str: &str = if sources.is_empty() {
+            "none()"
+        } else {
+            &sources.iter().map(|c| c.id().hex()).collect::<Vec<_>>().join("|")
+        };
+
     let pre_existing_destination;
 
-    if args.from.is_empty() {
-        // TODO: move this to a config
-        sources = workspace_command.parse_revset(ui, &RevisionArg::AT)?
-            .evaluate_to_commits()?
-            .try_collect()
-            .await?;
-        sources_str = RevisionArg::AT.to_string();
-    } else {
-        sources = workspace_command.parse_union_revsets(ui, &args.from)?
-            .evaluate_to_commits()?
-            .try_collect()
-            .await?;
-        sources_str = args.from.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("|");
-    }
     
     if insert_destination_commit {
         pre_existing_destination = None;
@@ -221,7 +219,7 @@ pub(crate) async fn cmd_squash(
         let mut context = workspace_command.env().revset_parse_context();
         context.local_variables.insert(
             "source",
-            parse_program(&sources_str)?
+            parse_program(sources_str)?
         );
         let mut diags = revset::RevsetDiagnostics::default();
         let expression = revset::parse(&mut diags, &into_str, &context)?;
@@ -230,7 +228,7 @@ pub(crate) async fn cmd_squash(
         let evaluator = workspace_command
             .attach_revset_evaluator(expression);
         let destination = revset_util::evaluate_revset_to_single_commit(
-            &into_str, 
+            "revsets.squash-into", 
             &evaluator, 
             || {
                 workspace_command.commit_summary_template()

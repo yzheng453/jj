@@ -125,8 +125,10 @@ fn test_squash() {
     let output = work_dir.run_jj(["squash"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
-    Error: Cannot squash merge commits without a specified destination
-    Hint: Use `--into` to specify which parent to squash into
+    Error: Revset `revsets.squash-into` resolved to more than one revision
+    Hint: The revset `revsets.squash-into` resolved to these revisions:
+      xznxytkn 9bb7863c d | (no description set)
+      mzvwutvl 22be6c4e c | (no description set)
     [EOF]
     [exit status: 1]
     ");
@@ -520,7 +522,7 @@ fn test_squash_from_to() {
     ");
 
     // Can squash from sibling, which results in the source being abandoned
-    let output = work_dir.run_jj(["squash", "--from", "c"]);
+    let output = work_dir.run_jj(["squash", "--from", "c", "--into", "@"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
     Working copy  (@) now at: kmkuslsw 941ab024 f | (no description set)
@@ -553,7 +555,7 @@ fn test_squash_from_to() {
 
     // Can squash from ancestor
     work_dir.run_jj(["op", "restore", &setup_opid]).success();
-    let output = work_dir.run_jj(["squash", "--from", "@--"]);
+    let output = work_dir.run_jj(["squash", "--from", "@--", "--into", "@"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
     Working copy  (@) now at: kmkuslsw c102d2c4 f | (no description set)
@@ -687,7 +689,7 @@ fn test_squash_from_to_partial() -> TestResult {
     let setup_opid = work_dir.current_operation_id();
 
     // If we don't make any changes in the diff-editor, the whole change is moved
-    let output = work_dir.run_jj(["squash", "-i", "--from", "c"]);
+    let output = work_dir.run_jj(["squash", "-i", "--from", "c", "--into", "d"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
     Working copy  (@) now at: vruxwmqv 85589465 d | (no description set)
@@ -724,7 +726,7 @@ fn test_squash_from_to_partial() -> TestResult {
     // Can squash only part of the change in interactive mode
     work_dir.run_jj(["op", "restore", &setup_opid]).success();
     std::fs::write(&edit_script, "reset file2")?;
-    let output = work_dir.run_jj(["squash", "-i", "--from", "c"]);
+    let output = work_dir.run_jj(["squash", "-i", "--from", "c", "--into", "d"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
     Working copy  (@) now at: vruxwmqv 62bd5cd9 d | (no description set)
@@ -764,7 +766,7 @@ fn test_squash_from_to_partial() -> TestResult {
     work_dir.run_jj(["op", "restore", &setup_opid]).success();
     // Clear the script so we know it won't be used
     std::fs::write(&edit_script, "")?;
-    let output = work_dir.run_jj(["squash", "--from", "c", "file1"]);
+    let output = work_dir.run_jj(["squash", "--from", "c", "file1", "--into", "d"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
     Working copy  (@) now at: vruxwmqv 76bf6139 d | (no description set)
@@ -976,7 +978,7 @@ fn test_squash_from_multiple() {
     ");
 
     // Empty squash shouldn't crash
-    let output = work_dir.run_jj(["squash", "--from=none()"]);
+    let output = work_dir.run_jj(["squash", "--from=none()", "--into=@"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
     Nothing changed.
@@ -1715,66 +1717,6 @@ fn test_squash_option_exclusion() {
     error: the argument '--message <MESSAGE>' cannot be used with '--use-destination-message'
 
     Usage: jj squash --message <MESSAGE> [FILESETS]...
-
-    For more information, try '--help'.
-    [EOF]
-    [exit status: 2]
-    ");
-
-    insta::assert_snapshot!(work_dir.run_jj([
-        "squash",
-        "-r@",
-        "--into=@-"
-    ]), @"
-    ------- stderr -------
-    error: the argument '--revision <REVSET>' cannot be used with '--into <REVSET>'
-
-    Usage: jj squash --revision <REVSET> [FILESETS]...
-
-    For more information, try '--help'.
-    [EOF]
-    [exit status: 2]
-    ");
-
-    insta::assert_snapshot!(work_dir.run_jj([
-        "squash",
-        "-r@",
-        "--onto=@-"
-    ]), @"
-    ------- stderr -------
-    error: the argument '--revision <REVSET>' cannot be used with '--onto <REVSETS>'
-
-    Usage: jj squash --revision <REVSET> [FILESETS]...
-
-    For more information, try '--help'.
-    [EOF]
-    [exit status: 2]
-    ");
-
-    insta::assert_snapshot!(work_dir.run_jj([
-        "squash",
-        "-r@",
-        "--after=@-"
-    ]), @"
-    ------- stderr -------
-    error: the argument '--revision <REVSET>' cannot be used with '--insert-after <REVSETS>'
-
-    Usage: jj squash --revision <REVSET> [FILESETS]...
-
-    For more information, try '--help'.
-    [EOF]
-    [exit status: 2]
-    ");
-
-    insta::assert_snapshot!(work_dir.run_jj([
-        "squash",
-        "-r@",
-        "--before=@-"
-    ]), @"
-    ------- stderr -------
-    error: the argument '--revision <REVSET>' cannot be used with '--insert-before <REVSETS>'
-
-    Usage: jj squash --revision <REVSET> [FILESETS]...
 
     For more information, try '--help'.
     [EOF]

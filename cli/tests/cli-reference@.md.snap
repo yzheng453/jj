@@ -3220,8 +3220,7 @@ An alternative squashing UI is available via the `-o`, `-A`, and `-B` options. U
 
 ###### **Options:**
 
-* `-r`, `--revision <REVSET>` — Revision to squash into its parent (default: @). Incompatible with the experimental `-o`/`-A`/`-B` options
-* `-f`, `--from <REVSETS>` — Revision(s) to squash from (default: @)
+* `-f`, `--from <REVSETS>` [alias: `revisions`] — Revision(s) to squash from (default: @)
 * `-t`, `--into <REVSET>` [alias: `to`] — Revision to squash into (default: @)
 * `-o`, `--onto <REVSETS>` [alias: `destination`] — (Experimental) The revision(s) to use as parent for the new commit (can be repeated to create a merge commit)
 * `-A`, `--insert-after <REVSETS>` [alias: `after`] — (Experimental) The revision(s) to insert the new commit after (can be repeated to create a merge commit)
