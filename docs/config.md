@@ -610,6 +610,18 @@ edit = true
 You can pass the `--no-edit` flag to `prev` and `next` if you find yourself
 needing the original behavior.
 
+### Squash default targets
+The `jj squash` command move changes from a revision into another revision.
+The default revision to move the change into is configured using:
+
+```toml
+[revsets]
+squash-into = 'heads(from)-'
+```
+
+Where from refers to the source revisions passed into the command. With the
+default configuration, `jj squash` performs `jj squash --from @ --into heads(@)-`. When `@` has a single parent, this merges `@` into its parent.
+
 ## List
 
 ### Default Template

@@ -57,12 +57,8 @@ use crate::ui::Ui;
 /// Without any options, moves the changes from the working-copy revision to the
 /// parent revision.
 ///
-/// With the `-r` option, moves the changes from the specified revision to the
-/// parent revision. Fails if there are several parent revisions (i.e., the
-/// given revision is a merge).
-///
-/// With the `--from` and/or `--into` options, moves changes from/to the given
-/// revisions. If either is left out, it defaults to the working-copy commit.
+/// Mves changes from `--from` argument(s) to the `--into` argument. 
+/// If `--into` is not specified, it defaults to `squash-into` revset.
 /// For example, `jj squash --into @--` moves changes from the working-copy
 /// commit to the grandparent.
 ///
@@ -92,11 +88,11 @@ pub(crate) struct SquashArgs {
     #[arg(
         long, 
         short, 
-        visible_alias = "revisions",
-        visible_short_alias = 'r',
+        visible_alias = "from",
+        visible_short_alias = 'f',
         value_name = "REVSETS")]
     #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
-    from: Vec<RevisionArg>,
+    revisions: Vec<RevisionArg>,
 
     /// Revision to squash into (default: @)
     #[arg(
@@ -191,14 +187,15 @@ pub(crate) async fn cmd_squash(
 
     let mut workspace_command = command.workspace_helper(ui).await?;
 
-    let mut sources: Vec<Commit> = if args.from.is_empty() {
+    let mut sources: Vec<Commit> = if args.revisions.is_empty() {
             workspace_command.parse_revset(ui, &RevisionArg::AT)?
         } else {
-            workspace_command.parse_union_revsets(ui, &args.from)?
+            workspace_command.parse_union_revsets(ui, &args.revisions)?
         }
         .evaluate_to_commits()?
         .try_collect()
         .await?;
+
     let sources_str: &str = if sources.is_empty() {
             "none()"
         } else {
@@ -218,7 +215,7 @@ pub(crate) async fn cmd_squash(
 
         let mut context = workspace_command.env().revset_parse_context();
         context.local_variables.insert(
-            "source",
+            "from",
             parse_program(sources_str)?
         );
         let mut diags = revset::RevsetDiagnostics::default();
@@ -432,7 +429,7 @@ pub(crate) async fn cmd_squash(
         }
 
         if let [only_path] = &*args.paths {
-            let no_rev_arg = args.from.is_empty() && args.into.is_none();
+            let no_rev_arg = args.revisions.is_empty() && args.into.is_none();
             if no_rev_arg
                 && tx
                     .base_workspace_helper()
