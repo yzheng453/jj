@@ -522,7 +522,7 @@ fn test_squash_from_to() {
     ");
 
     // Can squash from sibling, which results in the source being abandoned
-    let output = work_dir.run_jj(["--config=revsets.squash-into=d", "squash", "--from", "c"]);
+    let output = work_dir.run_jj(["--config=revsets.squash-into=f", "squash", "--from", "c"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
     Working copy  (@) now at: kmkuslsw 941ab024 f | (no description set)
@@ -555,7 +555,7 @@ fn test_squash_from_to() {
 
     // Can squash from ancestor
     work_dir.run_jj(["op", "restore", &setup_opid]).success();
-    let output = work_dir.run_jj(["squash", "--from", "@--", "--into", "d"]);
+    let output = work_dir.run_jj(["squash", "--from", "@--", "--into", "@"]);
     insta::assert_snapshot!(output, @"
     ------- stderr -------
     Working copy  (@) now at: kmkuslsw c102d2c4 f | (no description set)
