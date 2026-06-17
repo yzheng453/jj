@@ -57,7 +57,7 @@ use crate::ui::Ui;
 /// Without any options, moves the changes from the working-copy revision to the
 /// parent revision.
 ///
-/// Mves changes from `--from` argument(s) to the `--into` argument. 
+/// Mves changes from `--from` argument(s) to the `--into` argument.
 /// If `--into` is not specified, it defaults to `squash-into` revset.
 /// For example, `jj squash --into @--` moves changes from the working-copy
 /// commit to the grandparent.
@@ -86,21 +86,17 @@ use crate::ui::Ui;
 pub(crate) struct SquashArgs {
     /// Revision(s) to squash from (default: @)
     #[arg(
-        long, 
-        short, 
+        long,
+        short,
         visible_alias = "from",
         visible_short_alias = 'f',
-        value_name = "REVSETS")]
+        value_name = "REVSETS"
+    )]
     #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     revisions: Vec<RevisionArg>,
 
     /// Revision to squash into (default: @)
-    #[arg(
-        long,
-        short = 't',
-        visible_alias = "to",
-        value_name = "REVSET"
-    )]
+    #[arg(long, short = 't', visible_alias = "to", value_name = "REVSET")]
     #[arg(add = ArgValueCompleter::new(complete::revset_expression_mutable))]
     into: Option<RevisionArg>,
 
@@ -188,49 +184,51 @@ pub(crate) async fn cmd_squash(
     let mut workspace_command = command.workspace_helper(ui).await?;
 
     let mut sources: Vec<Commit> = if args.revisions.is_empty() {
-            workspace_command.parse_revset(ui, &RevisionArg::AT)?
-        } else {
-            workspace_command.parse_union_revsets(ui, &args.revisions)?
-        }
-        .evaluate_to_commits()?
-        .try_collect()
-        .await?;
+        workspace_command.parse_revset(ui, &RevisionArg::AT)?
+    } else {
+        workspace_command.parse_union_revsets(ui, &args.revisions)?
+    }
+    .evaluate_to_commits()?
+    .try_collect()
+    .await?;
 
     let sources_str: &str = if sources.is_empty() {
-            "none()"
-        } else {
-            &sources.iter().map(|c| c.id().hex()).collect::<Vec<_>>().join("|")
-        };
+        "none()"
+    } else {
+        &sources
+            .iter()
+            .map(|c| c.id().hex())
+            .collect::<Vec<_>>()
+            .join("|")
+    };
 
     let pre_existing_destination;
 
-    
     if insert_destination_commit {
         pre_existing_destination = None;
     } else {
         let into_str = match args.into.as_ref() {
             Some(into) => into.to_string(),
-            None => workspace_command.settings().get_string("revsets.squash-into")?
+            None => workspace_command
+                .settings()
+                .get_string("revsets.squash-into")?,
         };
 
         let mut context = workspace_command.env().revset_parse_context();
-        context.local_variables.insert(
-            "from",
-            parse_program(sources_str)?
-        );
+        context
+            .local_variables
+            .insert("from", parse_program(sources_str)?);
         let mut diags = revset::RevsetDiagnostics::default();
         let expression = revset::parse(&mut diags, &into_str, &context)?;
         print_parse_diagnostics(ui, "In revsets.squash-into", &diags)?;
 
-        let evaluator = workspace_command
-            .attach_revset_evaluator(expression);
+        let evaluator = workspace_command.attach_revset_evaluator(expression);
         let destination = revset_util::evaluate_revset_to_single_commit(
-            "revsets.squash-into", 
-            &evaluator, 
-            || {
-                workspace_command.commit_summary_template()
-            })
-            .await?;
+            "revsets.squash-into",
+            &evaluator,
+            || workspace_command.commit_summary_template(),
+        )
+        .await?;
         // remove the destination from the sources
         sources.retain(|source| source.id() != destination.id());
         pre_existing_destination = Some(destination);
